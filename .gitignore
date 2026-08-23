@@ -8,6 +8,7 @@ chroma_store/
 .ruff_cache/
 dist/
 *.egg-info/
+output/
 
 # 个人求职资料, 不入库
 docs/PROJECT_PLAN.md
