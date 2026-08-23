@@ -25,12 +25,13 @@ def compute_ratios(report: ExtractedReport) -> list[RatioResult]:
         if ic and ic.net_profit:
             roe = ic.net_profit / bs.total_equity
             results.append(RatioResult("净资产收益率 ROE", roe, _interp_roe(roe)))
-    if bs and bs.total_assets:
+    if bs and bs.total_assets and bs.total_liabilities is not None:
         debt_ratio = bs.total_liabilities / bs.total_assets
         results.append(
             RatioResult("资产负债率", debt_ratio, _interp_debt(debt_ratio))
         )
-    if ic and ic.revenue:
+    if ic and ic.revenue and ic.operating_cost is not None:
+        # 银行/券商利润表无"营业成本"科目, 跳过毛利率
         gross_margin = (ic.revenue - ic.operating_cost) / ic.revenue
         results.append(
             RatioResult("毛利率", gross_margin, "毛利率水平需结合行业均值对比")
