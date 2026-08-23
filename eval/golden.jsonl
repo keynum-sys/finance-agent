@@ -1,0 +1,6 @@
+# 金标评测集: 每行一份财报(第 6 周标注, 目标 20-30 份, 覆盖 3 个以上行业)
+# 示例:
+# {"code": "600519", "period": "2025-年报", "industry": "白酒",
+#  "balance_sheet": {"total_assets": 300000000000, "total_liabilities": 50000000000, "total_equity": 250000000000, "monetary_funds": 150000000000, "accounts_receivable": 100000000, "inventory": 45000000000},
+#  "income_statement": {"revenue": 170000000000, "operating_cost": 25000000000, "net_profit": 80000000000, "net_profit_deducted": 79000000000, "rd_expense": 2000000000},
+#  "cash_flow_statement": {"operating_cash_flow": 90000000000, "investing_cash_flow": -10000000000, "financing_cash_flow": -60000000000}}

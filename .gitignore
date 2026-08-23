@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+.env
+data_cache/
+chroma_store/
+.pytest_cache/
+.ruff_cache/
+dist/
+*.egg-info/
+
+# 个人求职资料, 不入库
+docs/PROJECT_PLAN.md
