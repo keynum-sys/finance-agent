@@ -1,19 +1,20 @@
-"""LangGraph 流水线编排: download -> extract -> analyze -> report。
+"""LangGraph 流水线编排: download -> extract -> analyze -> debate -> report。
 
 选型理由: 财报分析是确定性流程, 图编排比 ReAct 自由循环更可控、可回溯。
 
 图结构(条件边处理失败分支):
 
     START -> download
-    download --成功--> extract --抽取到数据--> analyze -> report -> END
+    download --成功--> extract --抽取到数据--> analyze -> debate -> report -> END
         |                |
         +--失败----------+--全部失败--> report -> END
 
 设计要点:
 - 每个节点是一个纯函数: 读 state -> 返回部分更新(dict), 不抛异常
   (节点内异常转成 state["error"], 由条件边路由到 report 收尾)
+- debate 是增强节点: 多头/空头/裁判三轮辩论, 失败静默跳过, 不阻断主流程
 - fetcher / chat_fn 依赖注入, 单元测试全离线
-- report 节点目前是确定性模板(第 8 周换成 LLM 叙述 + 辩论节点)
+- report 节点为确定性模板(数据必须可机器校验, 叙述性结论交给 debate)
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from finance_agent.agents import debate as debate_mod
 from finance_agent.analysis.ratios import compute_ratios
 from finance_agent.data.fetcher import ReportFetcher
 from finance_agent.parsing.extractor import ChatFn, ExtractedReport, extract_report
@@ -38,6 +40,7 @@ class ReportState(TypedDict, total=False):
     pdf_path: str
     extracted: dict             # ExtractedReport.model_dump()
     ratios: list[dict]          # [RatioResult.model_dump()]
+    debate: dict                # DebateResult.model_dump()(可选, 失败时缺失)
     # 结果
     report_md: str              # 最终 Markdown 报告
     error: str | None           # 任一节点失败的原因
@@ -82,8 +85,27 @@ def analyze(state: ReportState) -> dict:
     return {"ratios": [asdict(r) for r in ratios]}
 
 
+def _make_debate_node(chat_fn: ChatFn | None):
+    def debate(state: ReportState) -> dict:
+        """多空辩论(增强节点): 失败静默跳过, 绝不阻断主流程。
+
+        走到这里说明 analyze 已产出 ratios, 数据一定存在;
+        可能失败的是 LLM 调用本身(网络/解析), 由 try 兜底。
+        """
+        chat = chat_fn or debate_mod.default_chat
+        try:
+            result = debate_mod.run_debate(
+                state.get("extracted") or {}, state.get("ratios") or [], chat
+            )
+        except Exception:
+            return {}  # 辩论是锦上添花, 失败就出无辩论版报告
+        return {"debate": result.model_dump()}
+
+    return debate
+
+
 def report(state: ReportState) -> dict:
-    """生成最终 Markdown 报告(确定性模板, 第 8 周换 LLM 叙述)。"""
+    """生成最终 Markdown 报告: 确定性模板 + 辩论结论(若有)。"""
     lines: list[str] = [f"# {state.get('code', '?')} {state.get('period', '')} 财报分析", ""]
 
     if state.get("error"):
@@ -123,6 +145,15 @@ def report(state: ReportState) -> dict:
         for r in ratios:
             lines.append(f"| {r['name']} | {r['value']:.2%} | {r['interpretation']} |")
         lines.append("")
+
+    d = state.get("debate")
+    if d:
+        lines += [
+            "## 多空辩论", "",
+            "### 多头论据", "", d["bull_argument"], "",
+            "### 空头论据", "", d["bear_argument"], "",
+            f"### 裁决({d['stance']})", "", d["verdict"], "",
+        ]
 
     return {"report_md": "\n".join(lines)}
 
@@ -166,6 +197,7 @@ def build_graph(
     g.add_node("download", _make_download_node(fetcher))
     g.add_node("extract", _make_extract_node(chat_fn))
     g.add_node("analyze", analyze)
+    g.add_node("debate", _make_debate_node(chat_fn))
     g.add_node("report", report)
 
     g.add_edge(START, "download")
@@ -179,7 +211,8 @@ def build_graph(
         _route_after_extract,
         {"analyze": "analyze", "report": "report"},
     )
-    g.add_edge("analyze", "report")
+    g.add_edge("analyze", "debate")
+    g.add_edge("debate", "report")
     g.add_edge("report", END)
 
     return g.compile()
