@@ -81,6 +81,10 @@ COMPANY_DB = [
 
 RANDOM_KEYWORDS = {"随机", "随机公司", "随便", "random", "r"}
 
+# 连续追问循环中的退出 / 换公司 关键字
+EXIT_KW = {"退出", "exit", "quit", "q", "结束"}
+SWITCH_KW = {"换公司", "切换", "换一家", "下一家", "switch"}
+
 
 def _norm(s: str) -> str:
     return s.strip().lower().replace(" ", "")
@@ -132,16 +136,8 @@ def ask(prompt: str, default: str) -> str:
     return val or default
 
 
-def main() -> None:
-    print("=" * 60)
-    print("FinSight 财报分析 Agent — 一键运行")
-    print("=" * 60)
-    print("报告期格式: YYYY-年报 | YYYY-半年报 | YYYY-一季报 | YYYY-三季报")
-    print("-" * 60)
-
-    name, code = choose_company()
-    period = ask("请输入报告期 (如 2025-年报，回车默认 2025-年报): ", "2025-年报")
-
+def analyze_company(name: str, code: str, period: str) -> str:
+    """分析一家公司并进入连续追问。返回 'exit'（结束程序）或 'switch'（换下一家）。"""
     raw = input("可选: 输入附注问题 (直接回车或输入'随机' = 随机抽一题): ").strip()
     if not raw or _norm(raw) in {"随机", "随机提问", "random", "r"}:
         question = random.choice(QUESTION_BANK)
@@ -156,8 +152,7 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001  下载/解析失败给友好提示, 不闪退
         print(f"\n分析失败: {e}")
         print("提示: 可能是该公司/报告期暂无财报, 或网络问题。可换一家公司或报告期重试。")
-        input("\n按回车键退出...")
-        return
+        return "switch"
 
     print(f"\n入库子块数: {state.get('indexed_count', 'N/A')}")
     qa = state.get("qa")
@@ -168,10 +163,14 @@ def main() -> None:
             print(f"  第{c['page']}页({c['section']}): {c['snippet'][:60]}...")
 
     # 连续追问: 复用已建好的向量索引, 不重新下载/分析/抽取
-    EXIT_KW = {"退出", "exit", "quit", "q", "结束"}
+    ret: str = "exit"
     while True:
-        q = input("\n继续追问（直接回车或输入'退出'结束）：").strip()
+        q = input("\n继续追问（直接回车或输入'退出'结束；输入'换公司'可切换下一家）：").strip()
         if not q or _norm(q) in EXIT_KW:
+            ret = "exit"
+            break
+        if _norm(q) in SWITCH_KW:
+            ret = "switch"
             break
         try:
             ans, cits = store.query_with_citations(q, code, period)
@@ -193,7 +192,31 @@ def main() -> None:
     out.parent.mkdir(exist_ok=True)
     out.write_text(md, encoding="utf-8")
     print(f"\n完整报告已写入: {out}")
-    input("\n按回车键退出...")
+    return ret
+
+
+def main() -> None:
+    print("=" * 60)
+    print("FinSight 财报分析 Agent — 一键运行")
+    print("=" * 60)
+    print("报告期格式: YYYY-年报 | YYYY-半年报 | YYYY-一季报 | YYYY-三季报")
+    print("-" * 60)
+
+    first = True
+    while True:
+        if not first:
+            print("\n" + "=" * 60)
+            print("下面换一家公司继续分析")
+            print("=" * 60)
+        first = False
+        name, code = choose_company()
+        period = ask("请输入报告期 (如 2025-年报，回车默认 2025-年报): ", "2025-年报")
+        action = analyze_company(name, code, period)
+        if action == "exit":
+            break
+        # action == "switch": 回到外层循环, 重新选择公司
+
+    print("\n感谢使用 FinSight，再见。")
 
 
 if __name__ == "__main__":
