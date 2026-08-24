@@ -3,7 +3,7 @@
 
 双击项目根目录下的「运行demo.bat」即可启动本脚本。
 可以直接说一家公司的名字（或代码/别名），智能体会去巨潮下载它的财报并回答；
-库内 100 家常见 A 股直接离线匹配，库外 A 股公司名会联网（东方财富公开接口）解析成代码再下载；
+库内全量 A 股(5000+)直接离线匹配，库外/网络异常时仍可联网（东方财富公开接口）解析成代码再下载；
 也可以输入「随机」让系统随机抽一家公司来分析。
 """
 from __future__ import annotations
@@ -36,9 +36,9 @@ QUESTION_BANK = [
     "货币资金是否存在受限情形？受限金额多少？",
 ]
 
-# 内置常见 A 股公司库(名称, 代码, 别名)。按需可继续扩充。
-# 名称/别名解析是离线匹配；未收录的公司可直接输入 6 位代码让智能体去抓。
-COMPANY_DB = [
+# 精选常用 A 股公司库(名称, 代码, 别名)。带常用简称别名, 离线优先匹配。
+# 完整 A 股列表(5000+)由 data/a_shares.json 在运行时加载并合并(见 _load_full_list)。
+CURATED_DB = [
     ("贵州茅台", "600519", ["茅台"]),
     ("平安银行", "000001", []),
     ("宁德时代", "300750", ["宁德"]),
@@ -141,6 +141,33 @@ COMPANY_DB = [
     ("荣盛石化", "002493", []),
 ]
 
+
+def _load_full_list() -> list[tuple[str, str, list]]:
+    """加载 data/a_shares.json 全量 A 股列表(东方财富来源)。文件缺失时回退空列表。"""
+    p = Path(__file__).resolve().parent / "data" / "a_shares.json"
+    if not p.exists():
+        return []
+    try:
+        arr = json.loads(p.read_text(encoding="utf-8"))
+        return [(x["name"], x["code"], []) for x in arr if x.get("code") and x.get("name")]
+    except Exception:
+        return []
+
+
+# 合并精选库(带别名)与全量列表: 按代码去重, 同名代码以精选库为准(保留别名)
+_FULL = _load_full_list()
+_SEEN: set[str] = set()
+COMPANY_DB: list[tuple[str, str, list]] = []
+for _name, _code, _aliases in CURATED_DB:
+    _SEEN.add(_code)
+    COMPANY_DB.append((_name, _code, _aliases))
+for _name, _code, _aliases in _FULL:
+    if _code in _SEEN:
+        continue
+    _SEEN.add(_code)
+    COMPANY_DB.append((_name, _code, _aliases))
+
+
 RANDOM_KEYWORDS = {"随机", "随机公司", "随便", "random", "r"}
 
 # 连续追问循环中的退出 / 换公司 关键字
@@ -208,7 +235,7 @@ def _match_company(raw: str):
 
 def choose_company() -> tuple[str, str]:
     """交互选择公司: 支持名称/别名/6 位代码/随机；库外 A 股名称联网解析。"""
-    print(f"可分析公司示例(输入名称/别名/代码, 或'随机'): 共 {len(COMPANY_DB)} 家, 也可直接说任意 A 股公司名")
+    print(f"可分析公司: 全量 A 股共 {len(COMPANY_DB)} 家(名称/别名/代码任选, 或'随机')")
     print("  " + "、".join(n for n, _, _ in COMPANY_DB[:14]))
     while True:
         raw = input("请输入公司(名称/别名/代码，回车或'随机'=随机抽一家): ").strip()
