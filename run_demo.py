@@ -3,12 +3,16 @@
 
 双击项目根目录下的「运行demo.bat」即可启动本脚本。
 可以直接说一家公司的名字（或代码/别名），智能体会去巨潮下载它的财报并回答；
+库内 100 家常见 A 股直接离线匹配，库外 A 股公司名会联网（东方财富公开接口）解析成代码再下载；
 也可以输入「随机」让系统随机抽一家公司来分析。
 """
 from __future__ import annotations
 
+import json
 import random
 import sys
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
@@ -143,6 +147,41 @@ RANDOM_KEYWORDS = {"随机", "随机公司", "随便", "random", "r"}
 EXIT_KW = {"退出", "exit", "quit", "q", "结束"}
 SWITCH_KW = {"换公司", "切换", "换一家", "下一家", "switch"}
 
+# ---- 在线公司名解析 (东方财富公开搜索接口, 免授权) ----
+# 离线库未收录的公司名, 走此接口做 "名称 -> A股代码" 解析, 再交给 fetcher 下载财报。
+_EM_TOKEN = "D43BF7224DE39A71CFA68D4B5FEEGFCA"
+_em_cache: dict[str, list[tuple[str, str]] | None] = {}
+
+
+def _search_company_online(raw: str) -> list[tuple[str, str]] | None:
+    """按名称在线查询 A 股代码。返回 (name, code) 列表；网络失败返回 None。
+
+    仅保留 6 位数字的 A 股代码(沪A/深A)，自动过滤美股/港股/指数等。
+    """
+    key = _norm(raw)
+    if key in _em_cache:
+        return _em_cache[key]
+    try:
+        url = (
+            "https://searchapi.eastmoney.com/api/suggest/get?input="
+            + urllib.parse.quote(raw)
+            + "&type=14&token="
+            + _EM_TOKEN
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        data = json.loads(urllib.request.urlopen(req, timeout=15).read().decode("utf-8"))
+        rows = data.get("QuotationCodeTable", {}).get("Data", [])
+        hits = [
+            (x["Name"], x["Code"])
+            for x in rows
+            if isinstance(x.get("Code"), str) and x["Code"].isdigit() and len(x["Code"]) == 6
+        ]
+        _em_cache[key] = hits
+        return hits
+    except Exception:
+        _em_cache[key] = None
+        return None
+
 
 def _norm(s: str) -> str:
     return s.strip().lower().replace(" ", "")
@@ -168,8 +207,8 @@ def _match_company(raw: str):
 
 
 def choose_company() -> tuple[str, str]:
-    """交互选择公司: 支持名称/别名/6 位代码/随机。"""
-    print(f"可分析公司示例(输入名称/别名/代码, 或'随机'): 共 {len(COMPANY_DB)} 家")
+    """交互选择公司: 支持名称/别名/6 位代码/随机；库外 A 股名称联网解析。"""
+    print(f"可分析公司示例(输入名称/别名/代码, 或'随机'): 共 {len(COMPANY_DB)} 家, 也可直接说任意 A 股公司名")
     print("  " + "、".join(n for n, _, _ in COMPANY_DB[:14]))
     while True:
         raw = input("请输入公司(名称/别名/代码，回车或'随机'=随机抽一家): ").strip()
@@ -178,8 +217,15 @@ def choose_company() -> tuple[str, str]:
             print(f"[随机抽公司] {name} ({code})")
             return name, code
         res = _match_company(raw)
+        # 离线未命中且非 6 位代码时, 尝试联网解析任意 A 股公司名
+        if res is None and not (raw.isdigit() and len(raw) == 6):
+            online = _search_company_online(raw)
+            if online:
+                res = online[0] if len(online) == 1 else ("ambiguous", online)
+            elif online is None:
+                print("（联网查询公司失败，可检查网络，或直接输入 6 位代码让智能体去抓）")
         if res is None:
-            print("未收录该公司。可输入库中名称/别名、6 位代码，或输入'随机'。")
+            print("未收录/未查询到该公司。可输入库中名称/别名、6 位代码，或输入'随机'。")
             continue
         if isinstance(res, tuple) and res[0] == "ambiguous":
             print("匹配到多家，请更精确输入(全称或代码):")
