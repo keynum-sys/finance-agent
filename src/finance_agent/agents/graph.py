@@ -1,20 +1,26 @@
-"""LangGraph 流水线编排: download -> extract -> analyze -> debate -> report。
+"""LangGraph 流水线编排: download -> extract -> analyze -> {debate, index} -> [rag_qa] -> report。
 
 选型理由: 财报分析是确定性流程, 图编排比 ReAct 自由循环更可控、可回溯。
 
-图结构(条件边处理失败分支):
+图结构(条件边处理失败分支; rag 部分需 enable_rag=True 才装配):
 
     START -> download
-    download --成功--> extract --抽取到数据--> analyze -> debate -> report -> END
-        |                |
-        +--失败----------+--全部失败--> report -> END
+    download --成功--> extract --抽取到数据--> analyze --+--> debate --有question--> rag_qa -> report -> END
+        |                |                              |        |                            ^
+        +--失败----------+--全部失败--> report <--------+--------+--无question-----------------+
+                                                          |
+                                                          +--> index(与 debate 并行) ------> report
 
 设计要点:
 - 每个节点是一个纯函数: 读 state -> 返回部分更新(dict), 不抛异常
   (节点内异常转成 state["error"], 由条件边路由到 report 收尾)
 - debate 是增强节点: 多头/空头/裁判三轮辩论, 失败静默跳过, 不阻断主流程
-- fetcher / chat_fn 依赖注入, 单元测试全离线
-- report 节点为确定性模板(数据必须可机器校验, 叙述性结论交给 debate)
+- index 是 RAG 增强节点: 报告章节子块入向量库(与 debate 并行扇出),
+  失败静默跳过; rag_qa 仅在 state 带 question 时被路由到, 问答失败
+  也不阻断主流程(错误写进 qa.answer)
+- fetcher / chat_fn / store 依赖注入, 单元测试全离线;
+  enable_rag=False(默认)时不装配 RAG 节点, 零开销
+- report 节点为确定性模板(数据必须可机器校验, 叙述性结论交给 debate/rag_qa)
 """
 
 from __future__ import annotations
@@ -36,11 +42,15 @@ class ReportState(TypedDict, total=False):
     # 输入
     code: str                   # 股票代码, 如 "600519"
     period: str                 # 报告期, 如 "2025-年报"
+    question: str               # 可选: 附注问题(存在时路由到 rag_qa)
     # 中间产物
     pdf_path: str
     extracted: dict             # ExtractedReport.model_dump()
     ratios: list[dict]          # [RatioResult.model_dump()]
     debate: dict                # DebateResult.model_dump()(可选, 失败时缺失)
+    indexed: bool               # index 节点成功入库的标记
+    indexed_count: int          # 入库子块数
+    qa: dict                    # {"question","answer","citations":[{page,section,snippet}]}
     # 结果
     report_md: str              # 最终 Markdown 报告
     error: str | None           # 任一节点失败的原因
@@ -104,6 +114,56 @@ def _make_debate_node(chat_fn: ChatFn | None):
     return debate
 
 
+def _make_index_node(store_factory):
+    def index(state: ReportState) -> dict:
+        """报告章节子块入向量库(RAG 增强节点, 与 debate 并行)。
+
+        只依赖 pdf_path, 失败静默跳过——入库失败最多意味着
+        本次附注问答检索不到, 不影响主分析流程。
+        """
+        if state.get("error") or not state.get("pdf_path"):
+            return {}
+        try:
+            from finance_agent.parsing.pdf_parser import extract_pages, split_into_chunks
+
+            chunks = split_into_chunks(extract_pages(state["pdf_path"]))
+            n = store_factory().add_chunks(state["code"], state["period"], chunks)
+        except Exception:
+            return {}
+        return {"indexed": True, "indexed_count": n}
+
+    return index
+
+
+def _make_rag_node(store_factory, chat_fn: ChatFn | None):
+    def rag_qa(state: ReportState) -> dict:
+        """附注问答: 向量检索 + 带页码溯源的生成。
+
+        仅当 state 带 question 时被路由到; 问答失败不阻断主流程,
+        错误信息写进 qa.answer(用户可见但不影响其他章节)。
+        """
+        question = state.get("question")
+        if not question:
+            return {}
+        try:
+            answer, citations = store_factory().query_with_citations(
+                question, state["code"], state["period"], chat_fn=chat_fn
+            )
+            cits = [
+                {"page": c.page, "section": c.section, "snippet": c.snippet}
+                for c in citations
+            ]
+        except Exception as e:
+            return {"qa": {
+                "question": question,
+                "answer": f"(附注问答暂不可用: {e})",
+                "citations": [],
+            }}
+        return {"qa": {"question": question, "answer": answer, "citations": cits}}
+
+    return rag_qa
+
+
 def report(state: ReportState) -> dict:
     """生成最终 Markdown 报告: 确定性模板 + 辩论结论(若有)。"""
     lines: list[str] = [f"# {state.get('code', '?')} {state.get('period', '')} 财报分析", ""]
@@ -155,6 +215,19 @@ def report(state: ReportState) -> dict:
             f"### 裁决({d['stance']})", "", d["verdict"], "",
         ]
 
+    qa = state.get("qa")
+    if qa:
+        lines += [
+            "## 附注问答", "",
+            f"**问**: {qa['question']}", "",
+            f"**答**: {qa['answer']}", "",
+        ]
+        if qa["citations"]:
+            lines += ["**引用来源**:", ""]
+            for c in qa["citations"]:
+                lines.append(f"- 第{c['page']}页({c['section']}): {c['snippet']}")
+            lines.append("")
+
     return {"report_md": "\n".join(lines)}
 
 
@@ -177,6 +250,11 @@ def _route_after_extract(state: ReportState) -> str:
     return "analyze" if has_any and not state.get("error") else "report"
 
 
+def _route_after_debate(state: ReportState) -> str:
+    """带附注问题 -> 问答节点; 否则直接出报告。"""
+    return "rag_qa" if state.get("question") else "report"
+
+
 # --------------------------------------------------------------------------
 # 图构建
 # --------------------------------------------------------------------------
@@ -185,13 +263,31 @@ def _route_after_extract(state: ReportState) -> str:
 def build_graph(
     fetcher: ReportFetcher | None = None,
     chat_fn: ChatFn | None = None,
+    enable_rag: bool = False,
+    store=None,
 ) -> object:
     """构建并编译流水线图。
 
     fetcher / chat_fn 均可注入假实现, 测试全离线。
-    返回编译后的图, 用 result = graph.invoke({"code": ..., "period": ...}) 运行。
+    enable_rag=True 时装配 index / rag_qa 两个节点(见模块 docstring 图);
+    store 注入 ReportVectorStore 兼容对象(有 add_chunks / query_with_citations),
+    缺省时惰性创建真实 Chroma 向量库(仅在节点真正运行时才 import/加载模型)。
+    返回编译后的图, 用 graph.invoke({"code": ..., "period": ..., "question": ...}) 运行。
     """
     fetcher = fetcher or ReportFetcher()
+
+    # RAG 向量库惰性创建: 关闭时零开销, 开启时也避免在 import 阶段加载模型
+    _store_holder: list = []
+
+    def get_store():
+        if not _store_holder:
+            if store is None:
+                from finance_agent.rag.store import ReportVectorStore
+
+                _store_holder.append(ReportVectorStore())
+            else:
+                _store_holder.append(store)
+        return _store_holder[0]
 
     g = StateGraph(ReportState)
     g.add_node("download", _make_download_node(fetcher))
@@ -212,13 +308,34 @@ def build_graph(
         {"analyze": "analyze", "report": "report"},
     )
     g.add_edge("analyze", "debate")
-    g.add_edge("debate", "report")
+    if enable_rag:
+        g.add_node("index", _make_index_node(get_store))
+        g.add_node("rag_qa", _make_rag_node(get_store, chat_fn))
+        # index 与 debate 从 analyze 扇出并行; 都完成后汇入 report
+        g.add_edge("analyze", "index")
+        g.add_edge("index", "report")
+        g.add_conditional_edges(
+            "debate",
+            _route_after_debate,
+            {"rag_qa": "rag_qa", "report": "report"},
+        )
+        g.add_edge("rag_qa", "report")
+    else:
+        g.add_edge("debate", "report")
     g.add_edge("report", END)
 
     return g.compile()
 
 
-def run_pipeline(code: str, period: str, **kwargs) -> ReportState:
-    """便捷入口: 跑完整流水线, 返回最终 state(含 report_md)。"""
+def run_pipeline(code: str, period: str, question: str | None = None, **kwargs) -> ReportState:
+    """便捷入口: 跑完整流水线, 返回最终 state(含 report_md)。
+
+    传 question 时自动启用 RAG 并触发附注问答(页码溯源)。
+    """
+    if question:
+        kwargs.setdefault("enable_rag", True)
     graph = build_graph(**kwargs)
-    return graph.invoke({"code": code, "period": period})
+    state: ReportState = {"code": code, "period": period}
+    if question:
+        state["question"] = question
+    return graph.invoke(state)
