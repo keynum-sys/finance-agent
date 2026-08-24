@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import random
 import sys
 from pathlib import Path
 
@@ -13,7 +14,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from finance_agent.agents.graph import run_pipeline
 
-DEFAULT_QUESTION = "应收账款的坏账准备是怎么计提的?"
+# 预设题库: 覆盖分红/现金流/负债/营收/研发等多维度, 随机抽题时选用
+QUESTION_BANK = [
+    "公司的现金分红政策是什么？本期分红预案如何？",
+    "应收账款的坏账准备是怎么计提的？账龄分布如何？",
+    "本期经营活动现金流净额是多少？与净利润是否匹配？",
+    "公司的资产负债率和有息负债情况如何？",
+    "营业收入同比/环比增长情况如何？主要驱动因素是什么？",
+    "研发投入占营业收入的比例是多少？同比变化如何？",
+    "主营业务毛利率是多少？相比上年有何变化？",
+    "是否存在大额商誉？商誉减值风险如何？",
+    "前五大客户/供应商的集中度如何？",
+    "关联交易的主要内容和规模是什么？",
+    "员工总数和人均薪酬变化情况如何？",
+    "货币资金是否存在受限情形？受限金额多少？",
+]
 
 
 def ask(prompt: str, default: str) -> str:
@@ -31,9 +46,12 @@ def main() -> None:
 
     code = ask("请输入股票代码 (如 600519，回车默认 600519): ", "600519")
     period = ask("请输入报告期 (如 2025-年报，回车默认 2025-年报): ", "2025-年报")
-    question = input("可选: 输入附注问题 (直接回车用默认问题): ").strip()
-    if not question:
-        question = DEFAULT_QUESTION
+    raw = input("可选: 输入附注问题 (直接回车或输入'随机' = 随机抽一题): ").strip()
+    if not raw or raw in ("随机", "随机提问", "random", "r", "R"):
+        question = random.choice(QUESTION_BANK)
+        print(f"[随机抽题] {question}")
+    else:
+        question = raw
 
     print(f"\n开始分析 {code} {period}，首次会联网下载 PDF，请稍候...\n")
     state = run_pipeline(code, period, question=question)
