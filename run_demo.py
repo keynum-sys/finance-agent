@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 from finance_agent.agents.graph import run_pipeline
+from finance_agent.rag.store import ReportVectorStore
 
 # 预设题库: 覆盖分红/现金流/负债/营收/研发等多维度, 随机抽题时选用
 QUESTION_BANK = [
@@ -149,8 +150,9 @@ def main() -> None:
         question = raw
 
     print(f"\n开始分析 {name}({code}) {period}，首次会联网下载 PDF，请稍候...\n")
+    store = ReportVectorStore()  # 复用同一向量库做后续连续追问
     try:
-        state = run_pipeline(code, period, question=question)
+        state = run_pipeline(code, period, question=question, store=store, enable_rag=True)
     except Exception as e:  # noqa: BLE001  下载/解析失败给友好提示, 不闪退
         print(f"\n分析失败: {e}")
         print("提示: 可能是该公司/报告期暂无财报, 或网络问题。可换一家公司或报告期重试。")
@@ -164,6 +166,21 @@ def main() -> None:
         print("\n--- 引用来源 ---")
         for c in qa["citations"]:
             print(f"  第{c['page']}页({c['section']}): {c['snippet'][:60]}...")
+
+    # 连续追问: 复用已建好的向量索引, 不重新下载/分析/抽取
+    EXIT_KW = {"退出", "exit", "quit", "q", "结束"}
+    while True:
+        q = input("\n继续追问（直接回车或输入'退出'结束）：").strip()
+        if not q or _norm(q) in EXIT_KW:
+            break
+        try:
+            ans, cits = store.query_with_citations(q, code, period)
+        except Exception as e:
+            print(f"追问失败: {e}")
+            continue
+        print(f"\n答: {ans}")
+        if cits:
+            print("引用: " + "；".join(f"第{c.page}页({c.section})" for c in cits))
 
     md = state["report_md"]
     print("\n--- 报告章节 ---")
