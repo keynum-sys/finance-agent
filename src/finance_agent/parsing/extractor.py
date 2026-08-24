@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from typing import Literal
 
@@ -104,13 +105,34 @@ def _schema_prompt(model_cls: type[BaseModel]) -> str:
 
 
 def _user_prompt(statement_name: str, text: str, model_cls: type[BaseModel]) -> str:
+    unit_hint = _unit_hint(text)
     return (
         f"请从下面的《{statement_name}》文本中抽取字段, 输出 JSON:\n"
-        f"{{\n{_schema_prompt(model_cls)}\n}}\n\n"
-        f"----- {statement_name} 文本开始 -----\n"
+        f"{{\n{_schema_prompt(model_cls)}\n}}\n"
+        + (f"注意: 本报表标注的单位为「{unit_hint}」, "
+           f"输出前必须把每个数值换算成元后再填写。\n\n" if unit_hint else "")
+        + f"----- {statement_name} 文本开始 -----\n"
         f"{text}\n"
         f"----- {statement_name} 文本结束 -----"
     )
+
+
+# --------------------------------------------------------------------------
+# 单位检测(纯函数): 评测发现银行股"百万元"换算易错 10 倍, 显式提示给 LLM
+# --------------------------------------------------------------------------
+
+_UNIT_PATTERN = re.compile(r"单位[：:]\s*(?:人民币)?(百万元|亿元|千元|万元|元)")
+
+
+def detect_unit(text: str) -> str | None:
+    """从报表文本头部检测标注的货币单位, 如"货币单位：人民币百万元"。"""
+    m = _UNIT_PATTERN.search(text[:500])
+    return m.group(1) if m else None
+
+
+def _unit_hint(text: str) -> str | None:
+    unit = detect_unit(text)
+    return unit if unit and unit != "元" else None
 
 
 # --------------------------------------------------------------------------

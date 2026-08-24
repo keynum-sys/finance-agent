@@ -16,6 +16,7 @@ from finance_agent.parsing.extractor import (
     _extract_statement,
     _identity_check,
     _schema_prompt,
+    detect_unit,
 )
 
 
@@ -142,3 +143,30 @@ def test_identity_tolerance():
 def test_source_pages_field():
     report = ExtractedReport(source_pages={"合并资产负债表": 56})
     assert report.source_pages["合并资产负债表"] == 56
+
+
+# ---------------------------------------------------------------- 单位检测
+# 背景: 评测发现银行股"百万元"换算易错 10 倍, prompt 需显式提示单位
+
+def test_detect_unit_million():
+    text = "平安银行股份有限公司\n合并资产负债表\n货币单位：人民币百万元\n资产\n6,033,962"
+    assert detect_unit(text) == "百万元"
+
+
+def test_detect_unit_yuan():
+    text = "合并资产负债表\n单位：元\n币种：人民币\n项目"
+    assert detect_unit(text) == "元"
+
+
+def test_detect_unit_none():
+    assert detect_unit("合并利润表\n2025年1-3月\n没有单位标注") is None
+
+
+def test_user_prompt_contains_unit_hint():
+    from finance_agent.parsing.extractor import _user_prompt
+    text = "货币单位：人民币百万元\n资产总计 6,033,962"
+    prompt = _user_prompt("合并资产负债表", text, BalanceSheet)
+    assert "百万元" in prompt and "换算成元" in prompt
+    # 元为单位的报表不加提示
+    prompt2 = _user_prompt("合并资产负债表", "单位：元\n资产总计 100", BalanceSheet)
+    assert "换算成元" not in prompt2
