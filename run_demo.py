@@ -2,7 +2,8 @@
 """FinSight 财报分析 Agent — 交互式一键启动器。
 
 双击项目根目录下的「运行demo.bat」即可启动本脚本。
-按提示输入股票代码与报告期，即可跑完整分析流水线并回答附注问题。
+可以直接说一家公司的名字（或代码/别名），智能体会去巨潮下载它的财报并回答；
+也可以输入「随机」让系统随机抽一家公司来分析。
 """
 from __future__ import annotations
 
@@ -30,6 +31,100 @@ QUESTION_BANK = [
     "货币资金是否存在受限情形？受限金额多少？",
 ]
 
+# 内置常见 A 股公司库(名称, 代码, 别名)。按需可继续扩充。
+# 名称/别名解析是离线匹配；未收录的公司可直接输入 6 位代码让智能体去抓。
+COMPANY_DB = [
+    ("贵州茅台", "600519", ["茅台"]),
+    ("平安银行", "000001", []),
+    ("宁德时代", "300750", ["宁德"]),
+    ("中国平安", "601318", []),
+    ("招商银行", "600036", ["招行"]),
+    ("五粮液", "000858", []),
+    ("美的集团", "000333", ["美的"]),
+    ("格力电器", "000651", ["格力"]),
+    ("比亚迪", "002594", []),
+    ("海康威视", "002415", ["海康"]),
+    ("隆基绿能", "601012", ["隆基"]),
+    ("中国中免", "601888", ["中免"]),
+    ("伊利股份", "600887", ["伊利"]),
+    ("兴业银行", "601166", ["兴业"]),
+    ("紫金矿业", "601899", ["紫金"]),
+    ("长江电力", "600900", ["长电"]),
+    ("恒瑞医药", "600276", ["恒瑞"]),
+    ("三一重工", "600031", ["三一"]),
+    ("工商银行", "601398", ["工行"]),
+    ("农业银行", "601288", ["农行"]),
+    ("中国神华", "601088", ["神华"]),
+    ("海尔智家", "600690", ["海尔"]),
+    ("山西汾酒", "600809", ["汾酒"]),
+    ("海天味业", "603288", ["海天"]),
+    ("药明康德", "603259", ["药明"]),
+    ("中信证券", "600030", ["中信"]),
+    ("泸州老窖", "000568", ["泸州"]),
+    ("洋河股份", "002304", ["洋河"]),
+    ("顺丰控股", "002352", ["顺丰"]),
+    ("京东方A", "000725", ["京东方"]),
+    ("立讯精密", "002475", ["立讯"]),
+    ("东方财富", "300059", ["东财"]),
+    ("迈瑞医疗", "300760", ["迈瑞"]),
+    ("汇川技术", "300124", ["汇川"]),
+    ("爱尔眼科", "300015", ["爱尔"]),
+    ("潍柴动力", "000338", ["潍柴"]),
+    ("中国石油", "601857", ["中石油"]),
+    ("中芯国际", "688981", ["中芯"]),
+    ("金山办公", "688111", ["金山"]),
+    ("韦尔股份", "603501", ["韦尔"]),
+    ("温氏股份", "300498", ["温氏"]),
+    ("三花智控", "002050", ["三花"]),
+]
+
+RANDOM_KEYWORDS = {"随机", "随机公司", "随便", "random", "r"}
+
+
+def _norm(s: str) -> str:
+    return s.strip().lower().replace(" ", "")
+
+
+def _match_company(raw: str):
+    """名称/别名/代码 -> (name, code)；歧义返回 ('ambiguous', hits)；未匹配返回 None。"""
+    q = _norm(raw)
+    if q.isdigit() and len(q) == 6:
+        for name, code, _ in COMPANY_DB:
+            if code == q:
+                return (name, code)
+        return (q, q)  # 当作代码直用, 交给 fetcher 去巨潮抓
+    for name, code, aliases in COMPANY_DB:
+        if _norm(name) == q or q in (_norm(a) for a in aliases):
+            return (name, code)
+    hits = [(name, code) for name, code, _ in COMPANY_DB if q in _norm(name)]
+    if len(hits) == 1:
+        return hits[0]
+    if len(hits) > 1:
+        return ("ambiguous", hits)
+    return None
+
+
+def choose_company() -> tuple[str, str]:
+    """交互选择公司: 支持名称/别名/6 位代码/随机。"""
+    print(f"可分析公司示例(输入名称/别名/代码, 或'随机'): 共 {len(COMPANY_DB)} 家")
+    print("  " + "、".join(n for n, _, _ in COMPANY_DB[:14]))
+    while True:
+        raw = input("请输入公司(名称/别名/代码，回车或'随机'=随机抽一家): ").strip()
+        if not raw or _norm(raw) in RANDOM_KEYWORDS:
+            name, code = random.choice(COMPANY_DB)[:2]
+            print(f"[随机抽公司] {name} ({code})")
+            return name, code
+        res = _match_company(raw)
+        if res is None:
+            print("未收录该公司。可输入库中名称/别名、6 位代码，或输入'随机'。")
+            continue
+        if isinstance(res, tuple) and res[0] == "ambiguous":
+            print("匹配到多家，请更精确输入(全称或代码):")
+            for n, c in res[1]:
+                print(f"  {n} ({c})")
+            continue
+        return res
+
 
 def ask(prompt: str, default: str) -> str:
     val = input(prompt).strip()
@@ -40,21 +135,27 @@ def main() -> None:
     print("=" * 60)
     print("FinSight 财报分析 Agent — 一键运行")
     print("=" * 60)
-    print("示例公司代码: 600519(茅台) 000001(平安银行) 300750(宁德时代) 601318(中国平安)")
     print("报告期格式: YYYY-年报 | YYYY-半年报 | YYYY-一季报 | YYYY-三季报")
     print("-" * 60)
 
-    code = ask("请输入股票代码 (如 600519，回车默认 600519): ", "600519")
+    name, code = choose_company()
     period = ask("请输入报告期 (如 2025-年报，回车默认 2025-年报): ", "2025-年报")
+
     raw = input("可选: 输入附注问题 (直接回车或输入'随机' = 随机抽一题): ").strip()
-    if not raw or raw in ("随机", "随机提问", "random", "r", "R"):
+    if not raw or _norm(raw) in {"随机", "随机提问", "random", "r"}:
         question = random.choice(QUESTION_BANK)
         print(f"[随机抽题] {question}")
     else:
         question = raw
 
-    print(f"\n开始分析 {code} {period}，首次会联网下载 PDF，请稍候...\n")
-    state = run_pipeline(code, period, question=question)
+    print(f"\n开始分析 {name}({code}) {period}，首次会联网下载 PDF，请稍候...\n")
+    try:
+        state = run_pipeline(code, period, question=question)
+    except Exception as e:  # noqa: BLE001  下载/解析失败给友好提示, 不闪退
+        print(f"\n分析失败: {e}")
+        print("提示: 可能是该公司/报告期暂无财报, 或网络问题。可换一家公司或报告期重试。")
+        input("\n按回车键退出...")
+        return
 
     print(f"\n入库子块数: {state.get('indexed_count', 'N/A')}")
     qa = state.get("qa")
